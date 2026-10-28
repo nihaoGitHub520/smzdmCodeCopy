@@ -1,0 +1,22 @@
+name: smzdm_number_app
+description: 从什么值得买评论区提取9位数字的小工具
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0          # 网络请求，抓取网页
+  html: ^0.15.4         # 解析 HTML，提取评论文本
+  shared_preferences: ^2.2.0  # 本地保存监控链接
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true

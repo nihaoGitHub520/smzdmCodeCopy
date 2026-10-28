@@ -1,0 +1,63 @@
+name: Build Android APK
+
+# 触发条件：推送到 main 分支，或手动在 Actions 页面点 Run workflow
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java (Android 构建需要 JDK)
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # 本机无法预生成 android/ 工程（含 gradle wrapper 等二进制），
+      # 因此由 CI 用 flutter create 重建安卓工程，
+      # 再还原我们自己带依赖的 pubspec.yaml
+      - name: Backup pubspec
+        run: cp pubspec.yaml /tmp/pubspec.yaml
+
+      - name: Recreate Flutter Android project
+        run: flutter create --platforms=android .
+
+      - name: Restore our pubspec
+        run: cp /tmp/pubspec.yaml pubspec.yaml
+
+      # 抓取网页必需 INTERNET 权限，flutter create 生成的清单默认没有，这里补上
+      - name: Add INTERNET permission
+        run: |
+          MF=android/app/src/main/AndroidManifest.xml
+          if ! grep -q "android.permission.INTERNET" "$MF"; then
+            sed -i 's#</manifest>#<uses-permission android:name="android.permission.INTERNET"/>\n</manifest>#' "$MF"
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK (release)
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smzdm-code-copy-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
