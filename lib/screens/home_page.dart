@@ -50,9 +50,10 @@ class _HomePageState extends State<HomePage> {
       await _saveUrl(url);
 
       // 1) 悬浮窗权限（SYSTEM_ALERT_WINDOW）
-      var granted = await FlutterOverlayWindow.isPermissionGranted();
+      var granted =
+          (await FlutterOverlayWindow.isPermissionGranted()) == true;
       if (!granted) {
-        granted = await FlutterOverlayWindow.requestPermission();
+        granted = (await FlutterOverlayWindow.requestPermission()) == true;
       }
       if (!granted) {
         setState(() => _status = '未授予「显示在其他应用上层」权限，无法显示悬浮窗');
