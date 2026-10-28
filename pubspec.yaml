@@ -1,7 +1,7 @@
 name: smzdm_number_app
-description: 从什么值得买评论区提取9位数字的小工具
+description: 多多福袋助手 - 自动抓取什么值得买最新爆料、提取9位福袋码并一键跳拼多多搜索
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.2.0+3
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -9,10 +9,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  http: ^1.2.0          # 网络请求，抓取网页
-  html: ^0.15.4         # 解析 HTML，提取评论文本
-  shared_preferences: ^2.2.0  # 本地保存监控链接 / 悬浮窗尺寸
-  flutter_overlay_window: ^1.0.2  # 系统悬浮窗（可后台常驻）
+  http: ^1.2.0          # 网络请求，抓取发现页 / 详情页
+  html: ^0.15.4         # 解析 HTML，提取爆料与评论
+  shared_preferences: ^2.2.0  # 本地保存链接
   url_launcher: ^6.2.6        # 打开拼多多深链 pinduoduo://
 
 dev_dependencies:

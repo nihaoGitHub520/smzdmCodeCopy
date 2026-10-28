@@ -1,38 +1,29 @@
+/// App 显示名（桌面图标 / 标题栏统一用这个）
+const String kAppName = '多多福袋助手';
+
+/// 发现页：从这里取「最新爆料」列表，取第一个条目的页面 ID
+/// （如失效可在 App 的「更多设置」里改成别的发现页链接）
+const String kDiscoverUrl = 'https://faxian.smzdm.com/h2s8645t0f0c0p1/';
+
+/// 从发现页最多缓存多少条爆料（第一个没评论时可点「下一条」往后翻）
+const int kDiscoverFeedLimit = 10;
+
 /// 默认监控链接（最新评论排序页，评论为服务端直出，可直接解析）
 const String kDefaultUrl =
     'https://www.smzdm.com/p/184881376/p1/?sort_tab=new/';
+
+/// 列表里最多展示多少条评论
+const int kMaxShowComments = 12;
 
 // ---------------------------------------------------------------------------
 // 本地存储（shared_preferences）key
 // ---------------------------------------------------------------------------
 
-/// 监控链接
+/// 当前监控的商品链接
 const String kPrefUrl = 'monitor_url';
 
-/// 悬浮窗是否显示（用户可开关，默认开）
-const String kPrefOverlayEnabled = 'overlay_enabled';
-
-/// 悬浮窗宽度（dp）
-const String kPrefOverlayWidth = 'overlay_width';
-
-/// 悬浮窗高度（dp）
-const String kPrefOverlayHeight = 'overlay_height';
-
-// ---------------------------------------------------------------------------
-// 悬浮窗默认尺寸与上下限（单位：dp，与 flutter_overlay_window 的 height/width 一致）
-// ---------------------------------------------------------------------------
-
-const int kOverlayDefaultWidth = 330;
-const int kOverlayDefaultHeight = 420;
-
-const int kOverlayMinWidth = 200;
-const int kOverlayMinHeight = 180;
-
-/// 单个按钮调整尺寸时的步长（dp）
-const int kOverlayStep = 30;
-
-/// 悬浮窗里列表最多展示多少条评论（超出可滚动）
-const int kMaxShowComments = 12;
+/// 发现页链接
+const String kPrefDiscoverUrl = 'discover_url';
 
 // ---------------------------------------------------------------------------
 // 拼多多搜索

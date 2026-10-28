@@ -6,8 +6,9 @@ on:
     branches: ["main"]
   workflow_dispatch: {}
 
+# 发布 Release 需要写权限
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -42,11 +43,10 @@ jobs:
         run: cp /tmp/pubspec.yaml pubspec.yaml
 
       # 注入：
-      #  1) 网络/悬浮窗/前台服务权限 + OverlayService，minSdk 提到 23
-      #  2) <queries> 声明 pinduoduo 深链（Android 11+ 才能解析/打开）
-      #  3) 自定义 Application：预创建悬浮窗引擎并注册全部插件，
-      #     并额外提供 smzdm/open_url 原生通道（悬浮窗里直接拉起拼多多）
-      - name: Patch AndroidManifest & minSdk & preload engine
+      #  1) INTERNET 权限
+      #  2) 桌面图标/应用名改为「多多福袋助手」
+      #  3) <queries> 声明 pinduoduo 深链（Android 11+ 才能解析/打开）
+      - name: Patch AndroidManifest (权限 / 应用名 / 拼多多深链)
         run: |
           python3 - <<'PY'
           import re, pathlib
@@ -54,31 +54,15 @@ jobs:
           mf = pathlib.Path('android/app/src/main/AndroidManifest.xml')
           s = mf.read_text(encoding='utf-8')
 
-          perms = [
-              'android.permission.INTERNET',
-              'android.permission.SYSTEM_ALERT_WINDOW',
-              'android.permission.FOREGROUND_SERVICE',
-              'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
-          ]
-          for p in perms:
-              if p not in s:
-                  s = s.replace('</manifest>',
-                                '    <uses-permission android:name="%s"/>\n</manifest>' % p)
+          # --- 1) 联网权限（抓网页必需） ---
+          if 'android.permission.INTERNET' not in s:
+              s = s.replace('</manifest>',
+                            '    <uses-permission android:name="android.permission.INTERNET"/>\n</manifest>')
 
-          if 'OverlayService' not in s:
-              service = (
-                  '        <service\n'
-                  '            android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"\n'
-                  '            android:exported="false"\n'
-                  '            android:foregroundServiceType="specialUse">\n'
-                  '            <property\n'
-                  '                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n'
-                  '                android:value="smzdm_number_overlay"/>\n'
-                  '        </service>\n'
-              )
-              s = s.replace('</application>', service + '    </application>')
+          # --- 2) 应用显示名（桌面图标下面的名字） ---
+          s = re.sub(r'android:label="[^"]*"', 'android:label="多多福袋助手"', s, count=1)
 
-          # --- queries：允许解析并打开 pinduoduo:// 深链 ---
+          # --- 3) queries：允许解析并打开 pinduoduo:// 深链 ---
           #   Flutter 模板自带一个 <queries>（PROCESS_TEXT），优先插到它里面，
           #   不能重复创建 <queries> 标签。
           pdd_query = (
@@ -98,111 +82,7 @@ jobs:
                   s = s.replace('</manifest>',
                                 '    <queries>\n' + pdd_query + '    </queries>\n</manifest>')
 
-          # --- 取包名，写入自定义 Application ---
-          pkg = None
-          for f in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
-              gp = pathlib.Path(f)
-              if not gp.exists():
-                  continue
-              t = gp.read_text(encoding='utf-8')
-              m = (re.search(r'namespace\s*[=]?\s*"([^"]+)"', t)
-                   or re.search(r'applicationId\s*[=]?\s*"([^"]+)"', t))
-              if m:
-                  pkg = m.group(1)
-                  break
-
-          if pkg:
-              # Flutter 模板的 application 已带 android:name="${applicationName}"，
-              # 必须替换掉它，不能再加一个（重复属性会导致 manifest 解析失败）
-              if '${applicationName}' in s:
-                  s = s.replace('android:name="${applicationName}"',
-                                'android:name="%s.PreloadApp"' % pkg, 1)
-              elif 'PreloadApp' not in s:
-                  s = re.sub(r'<application(\s)',
-                             '<application android:name="%s.PreloadApp"\\1' % pkg,
-                             s, count=1)
-
-              java = '''package %s;
-
-          import android.app.Application;
-          import android.content.Intent;
-          import android.net.Uri;
-
-          import io.flutter.FlutterInjector;
-          import io.flutter.embedding.engine.FlutterEngine;
-          import io.flutter.embedding.engine.FlutterEngineCache;
-          import io.flutter.embedding.engine.FlutterEngineGroup;
-          import io.flutter.embedding.engine.dart.DartExecutor;
-          import io.flutter.embedding.engine.loader.FlutterLoader;
-          import io.flutter.plugin.common.MethodChannel;
-          import io.flutter.plugins.GeneratedPluginRegistrant;
-
-          /**
-           * 预创建悬浮窗引擎并注册全部 Flutter 插件。
-           * flutter_overlay_window 自建 overlay 引擎时不会注册插件，
-           * 导致悬浮窗里无法使用 url_launcher / shared_preferences；
-           * 这里提前用相同的缓存 tag 建好引擎（插件检测到已存在会直接复用），
-           * 并额外注册 smzdm/open_url 原生通道用于拉起拼多多深链。
-           */
-          public class PreloadApp extends Application {
-              private static final String TAG = "myCachedEngine";
-
-              @Override
-              public void onCreate() {
-                  super.onCreate();
-                  try {
-                      if (FlutterEngineCache.getInstance().get(TAG) != null) {
-                          return;
-                      }
-                      // Application 阶段 Flutter 还没初始化，必须先初始化再取 bundle 路径
-                      FlutterLoader loader = FlutterInjector.instance().flutterLoader();
-                      loader.startInitialization(this);
-                      loader.ensureInitializationComplete(this, null);
-                      String bundlePath = loader.findAppBundlePath();
-
-                      FlutterEngineGroup group = new FlutterEngineGroup(this);
-                      DartExecutor.DartEntrypoint entry =
-                              new DartExecutor.DartEntrypoint(bundlePath, "overlayMain");
-                      FlutterEngine engine = group.createAndRunEngine(this, entry);
-                      GeneratedPluginRegistrant.registerWith(engine);
-                      registerOpenUrlChannel(engine);
-                      FlutterEngineCache.getInstance().put(TAG, engine);
-                  } catch (Throwable ignored) {
-                      // 预创建失败不影响主流程（悬浮窗仍有转给主 App 打开的兜底）
-                  }
-              }
-
-              private void registerOpenUrlChannel(FlutterEngine engine) {
-                  try {
-                      MethodChannel channel = new MethodChannel(
-                              engine.getDartExecutor().getBinaryMessenger(), "smzdm/open_url");
-                      channel.setMethodCallHandler((call, result) -> {
-                          if (!"open".equals(call.method)) {
-                              result.notImplemented();
-                              return;
-                          }
-                          try {
-                              String url = call.argument("url");
-                              Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                              intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                              startActivity(intent);
-                              result.success(true);
-                          } catch (Throwable t) {
-                              result.success(false);
-                          }
-                      });
-                  } catch (Throwable ignored) {
-                  }
-              }
-          }
-          ''' % pkg
-
-              jp = pathlib.Path('android/app/src/main/java') / pkg.replace('.', '/') / 'PreloadApp.java'
-              jp.parent.mkdir(parents=True, exist_ok=True)
-              jp.write_text(java, encoding='utf-8')
-              print('=== wrote %s ===' % jp)
-
-          # 校验补丁后的 manifest 是合法 XML（避免再出现 gradle manifest 解析失败）
+          # 校验补丁后的 manifest 是合法 XML（避免 gradle manifest 解析失败）
           import xml.dom.minidom
           xml.dom.minidom.parseString(s.encode('utf-8'))
           print('=== manifest XML 校验通过 ===')
@@ -210,17 +90,6 @@ jobs:
           mf.write_text(s, encoding='utf-8')
           print('=== patched AndroidManifest.xml ===')
           print(s)
-
-          # minSdk = 23（flutter_overlay_window 要求）
-          for f in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
-              p = pathlib.Path(f)
-              if p.exists():
-                  t = p.read_text(encoding='utf-8')
-                  t = t.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
-                  t = re.sub(r'minSdkVersion\s+\d+', 'minSdkVersion 23', t)
-                  t = re.sub(r'minSdk\s*=\s*\d+', 'minSdk = 23', t)
-                  p.write_text(t, encoding='utf-8')
-                  print('=== patched minSdk in %s ===' % f)
           PY
 
       - name: Install dependencies
@@ -233,9 +102,39 @@ jobs:
       - name: Build APK (release)
         run: flutter build apk --release
 
+      # 读出版本号，并把 APK 改成带版本号的文件名，方便 Release 里区分
+      - name: Prepare APK for release
+        run: |
+          VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+          echo "APP_VER=$VER" >> "$GITHUB_ENV"
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             "duoduo-fudai-v${VER}-build${{ github.run_number }}.apk"
+          ls -la duoduo-fudai-*.apk
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: smzdm-code-copy-apk
+          name: duoduo-fudai-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+
+      # 每次构建成功都发布到 Release（tag 唯一，历史版本都会保留）
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: 多多福袋助手 v${{ env.APP_VER }} (build ${{ github.run_number }})
+          body: |
+            自动构建产物 · 多多福袋助手 v${{ env.APP_VER }}
+
+            - 提交：${{ github.sha }}
+            - 分支：${{ github.ref_name }}
+            - 构建序号：#${{ github.run_number }}
+
+            直接下载下方 `duoduo-fudai-*.apk` 安装即可（安卓需允许「未知来源」安装）。
+          files: duoduo-fudai-*.apk
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
