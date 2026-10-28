@@ -7,3 +7,7 @@ build/
 *.iml
 .DS_Store
 /android/local.properties
+
+# 构建/下载产物
+apk_out/
+*.apk
