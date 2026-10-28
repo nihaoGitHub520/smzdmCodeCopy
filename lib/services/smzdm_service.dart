@@ -1,78 +1,60 @@
+import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as html_parser;
-import 'package:html/dom.dart';
 
 /// 负责抓取「什么值得买」详情页并解析出评论文本。
-/// 关键点：smzdm 有反爬，必须伪装成桌面浏览器（User-Agent）才容易拿到正文。
+///
+/// 关键结论（实测 2026-10）：
+/// - smzdm 详情页的评论是 **服务端直出** 在 HTML 里的，
+///   容器为 `#commentTabBlockNew > ul.comment-main-list`，
+///   每条评论的 **正文** 节点是 `.comment-main-list-item-content-comment`。
+/// - 不需要调所谓的评论接口；禁用浏览器 F12 调试也不影响，curl 直接能拿到。
+/// - 一定要用桌面浏览器 UA，否则可能拿到精简页。
 class SmzdmService {
-  // 桌面 Chrome 的 UA，避免被当成爬虫拦掉
   static const _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-  /// 抓取详情页，返回按页面顺序的「评论文本」列表（里面会混着无关评论，过滤在外层做）。
+  /// 抓取详情页，返回按页面顺序的「评论文本」列表。
   static Future<List<String>> fetchComments(String url) async {
-    final uri = Uri.tryParse(url);
+    final uri = Uri.tryParse(url.trim());
     if (uri == null) throw Exception('链接格式不正确');
 
-    final resp = await http
-        .get(
-          uri,
-          headers: {
-            'User-Agent': _userAgent,
-            'Accept': 'text/html,application/xhtml+xml',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-          },
-        )
-        .timeout(const Duration(seconds: 20));
+    // 去掉 #comments 之类的锚点，避免请求异常
+    final clean = uri.replace(fragment: '');
+
+    final resp = await http.get(
+      clean,
+      headers: {
+        'User-Agent': _userAgent,
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Referer': 'https://www.smzdm.com/',
+      },
+    ).timeout(const Duration(seconds: 25));
 
     if (resp.statusCode != 200) {
       throw Exception('网页返回状态码 ${resp.statusCode}');
     }
 
-    // http 包已按响应头编码解码为字符串
-    final doc = html_parser.parse(resp.body);
-    return _extractCommentTexts(doc);
-  }
+    // 强制按 UTF-8 解码，避免中文乱码
+    final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
+    final doc = html_parser.parse(body);
 
-  /// 从解析后的页面 DOM 里提取评论文本，分三层防御：
-  /// 1) 优先用 smzdm 评论容器的具体选择器（社区脚本验证过）
-  /// 2) 退而求其次：抓整个评论区容器，再按行拆成单条评论
-  /// 3) 最后兜底：扫描页面里长度合适的文本块（粗略，可能包含非评论）
-  static List<String> _extractCommentTexts(Document doc) {
-    final specificSelectors = [
-      '.comment-main-list-item-content',
-      '#commentTabBlockNew .comment-main-list-item-content',
-      '.comment-list .comment-content',
-    ];
-    for (final sel in specificSelectors) {
-      final blocks = doc.querySelectorAll(sel);
-      if (blocks.isNotEmpty) {
-        final texts = <String>[];
-        for (final block in blocks) {
-          final t = block.text.trim();
-          if (t.isNotEmpty) texts.add(t);
-        }
-        if (texts.isNotEmpty) return texts;
-      }
+    // 评论正文节点（只含正文，不含昵称/时间/点赞数）
+    var nodes = doc.querySelectorAll('.comment-main-list-item-content-comment');
+    // 兜底：若页面结构变化，退回到整条评论容器
+    if (nodes.isEmpty) {
+      nodes = doc.querySelectorAll('.comment-main-list-item-content');
     }
 
-    // 第二层：整块评论区按行拆
-    final container = doc.querySelector('#commentTabBlockNew');
-    if (container != null) {
-      return container.text
-          .split(RegExp(r'[\n\r]+'))
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList();
+    final texts = <String>[];
+    for (final n in nodes) {
+      final t = n.text.replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (t.isNotEmpty) texts.add(t);
     }
-
-    // 第三层：兜底扫描
-    final fallback = <String>[];
-    doc.body?.querySelectorAll('p, div, span, li').forEach((e) {
-      final t = e.text.trim();
-      if (t.length >= 5 && t.length <= 200) fallback.add(t);
-    });
-    return fallback;
+    return texts;
   }
 }

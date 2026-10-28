@@ -12,6 +12,7 @@ dependencies:
   http: ^1.2.0          # 网络请求，抓取网页
   html: ^0.15.4         # 解析 HTML，提取评论文本
   shared_preferences: ^2.2.0  # 本地保存监控链接
+  flutter_overlay_window: ^1.0.2  # 系统悬浮窗（可后台常驻）
 
 dev_dependencies:
   flutter_test:

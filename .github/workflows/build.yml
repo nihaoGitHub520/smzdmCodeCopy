@@ -41,13 +41,57 @@ jobs:
       - name: Restore our pubspec
         run: cp /tmp/pubspec.yaml pubspec.yaml
 
-      # 抓取网页必需 INTERNET 权限，flutter create 生成的清单默认没有，这里补上
-      - name: Add INTERNET permission
+      # 注入：网络权限 + 悬浮窗权限 + 前台服务 + OverlayService，并把 minSdk 提到 23
+      - name: Patch AndroidManifest & minSdk
         run: |
-          MF=android/app/src/main/AndroidManifest.xml
-          if ! grep -q "android.permission.INTERNET" "$MF"; then
-            sed -i 's#</manifest>#<uses-permission android:name="android.permission.INTERNET"/>\n</manifest>#' "$MF"
-          fi
+          python3 - <<'PY'
+          import re, pathlib, sys
+
+          mf = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          s = mf.read_text(encoding='utf-8')
+
+          perms = [
+              'android.permission.INTERNET',
+              'android.permission.SYSTEM_ALERT_WINDOW',
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
+          ]
+          for p in perms:
+              if p not in s:
+                  s = s.replace('</manifest>',
+                                f'    <uses-permission android:name="{p}"/>\n</manifest>')
+
+          if 'OverlayService' not in s:
+              service = (
+                  '        <service\n'
+                  '            android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"\n'
+                  '            android:exported="false"\n'
+                  '            android:foregroundServiceType="specialUse">\n'
+                  '            <property\n'
+                  '                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n'
+                  '                android:value="smzdm_number_overlay"/>\n'
+                  '        </service>\n'
+              )
+              s = s.replace('</application>', service + '    </application>')
+
+          mf.write_text(s, encoding='utf-8')
+          print('=== patched AndroidManifest.xml ===')
+          print(s)
+
+          # minSdk = 23（flutter_overlay_window 要求）
+          for f in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
+              p = pathlib.Path(f)
+              if p.exists():
+                  t = p.read_text(encoding='utf-8')
+                  t = t.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
+                  t = re.sub(r'minSdkVersion\s+\d+', 'minSdkVersion 23', t)
+                  t = re.sub(r'minSdk\s*=\s*\d+', 'minSdk = 23', t)
+                  p.write_text(t, encoding='utf-8')
+                  print(f'=== patched minSdk in {f} ===')
+                  for line in t.splitlines():
+                      if 'minSdk' in line:
+                          print('  ', line.strip())
+          PY
 
       - name: Install dependencies
         run: flutter pub get

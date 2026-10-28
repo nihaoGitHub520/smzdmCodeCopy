@@ -1,26 +1,26 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../models/number_item.dart';
-import '../services/smzdm_service.dart';
-import '../services/number_filter.dart';
-import '../widgets/comment_bottom_sheet.dart';
 
-// 你给的默认监控链接（App 内可改成别的商品详情页）
-const String _kDefaultUrl =
-    'https://www.smzdm.com/p/184881376/?zdm_ss=Android_7827879137_&send_by=7827879137&from=other&invite_code=zdmam4wdehinv';
+import '../constants.dart';
+import '../models/number_item.dart';
+import '../services/number_filter.dart';
+import '../services/smzdm_service.dart';
+
 const String _kPrefUrl = 'monitor_url';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
+
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
   final _urlController = TextEditingController();
-  String _status = '尚未抓取';
-  bool _loading = false;
-  List<NumberItem> _recent = [];
+  String _status = '就绪';
+  bool _busy = false;
+  List<NumberItem> _preview = [];
 
   @override
   void initState() {
@@ -28,10 +28,9 @@ class _HomePageState extends State<HomePage> {
     _loadSavedUrl();
   }
 
-  // 启动时读取上次保存的链接（本地存储，无需登录）
   Future<void> _loadSavedUrl() async {
     final prefs = await SharedPreferences.getInstance();
-    _urlController.text = prefs.getString(_kPrefUrl) ?? _kDefaultUrl;
+    _urlController.text = prefs.getString(_kPrefUrl) ?? kDefaultUrl;
   }
 
   Future<void> _saveUrl(String url) async {
@@ -39,47 +38,74 @@ class _HomePageState extends State<HomePage> {
     await prefs.setString(_kPrefUrl, url);
   }
 
-  // 点「打开评论弹窗」：先抓取 -> 过滤 -> 弹窗展示
-  Future<void> _fetchAndShow() async {
+  /// 启动系统悬浮窗（显示在其他应用上层，可后台常驻）
+  Future<void> _startOverlay() async {
     final url = _urlController.text.trim();
     if (url.isEmpty) {
       setState(() => _status = '请先填写链接');
       return;
     }
-    await _saveUrl(url);
-    setState(() => _loading = true);
+    setState(() => _busy = true);
     try {
-      final comments = await SmzdmService.fetchComments(url);
-      final numbers = NumberFilter.extractFromComments(comments, max: 5);
-      setState(() {
-        _recent = numbers;
-        _status = '抓到 ${comments.length} 条评论，有效 9 位数字 ${numbers.length} 个';
-      });
-      if (!mounted) return;
-      _openSheet(numbers, url);
+      await _saveUrl(url);
+
+      // 1) 悬浮窗权限（SYSTEM_ALERT_WINDOW）
+      var granted = await FlutterOverlayWindow.isPermissionGranted();
+      if (!granted) {
+        granted = await FlutterOverlayWindow.requestPermission();
+      }
+      if (!granted) {
+        setState(() => _status = '未授予「显示在其他应用上层」权限，无法显示悬浮窗');
+        return;
+      }
+
+      // 2) 显示悬浮窗
+      await FlutterOverlayWindow.showOverlay(
+        height: 340,
+        width: 312,
+        alignment: OverlayAlignment.center,
+        enableDrag: true,
+        dismissConfig: const OverlayDismissConfig(),
+        overlayTitle: '评论数字悬浮窗',
+        overlayContent: '后台监控中，点悬浮窗可刷新/粘贴/复制',
+      );
+
+      // 3) 把当前链接同步给悬浮窗（best-effort）
+      try {
+        await FlutterOverlayWindow.shareData(url);
+      } catch (_) {}
+
+      setState(() => _status = '悬浮窗已启动，可退回桌面，窗口会一直显示');
+
+      // 4) 主界面顺带抓一次，做个小预览
+      try {
+        final comments = await SmzdmService.fetchComments(url);
+        final nums = NumberFilter.extractFromComments(comments, max: 5);
+        if (mounted) {
+          setState(() {
+            _preview = nums;
+            _status = '抓到 ${comments.length} 条评论，有效数字 ${nums.length} 个';
+          });
+        }
+      } catch (_) {
+        if (mounted) {
+          setState(() => _status = '悬浮窗已启动（自动抓取失败，可在悬浮窗里点「粘贴」）');
+        }
+      }
     } catch (e) {
-      setState(() => _status = '抓取失败，可点弹窗里的「粘贴」手动输入');
-      if (!mounted) return;
-      _openSheet([], url, error: e.toString());
+      if (mounted) setState(() => _status = '启动失败：$e');
     } finally {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _busy = false);
     }
   }
 
-  void _openSheet(List<NumberItem> numbers, String url, {String? error}) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => CommentBottomSheet(
-        initialNumbers: numbers,
-        url: url,
-        error: error,
-        onRefresh: () async {
-          final comments = await SmzdmService.fetchComments(url);
-          return NumberFilter.extractFromComments(comments, max: 5);
-        },
-      ),
-    );
+  Future<void> _stopOverlay() async {
+    try {
+      await FlutterOverlayWindow.closeOverlay();
+      if (mounted) setState(() => _status = '悬浮窗已关闭');
+    } catch (e) {
+      if (mounted) setState(() => _status = '关闭失败：$e');
+    }
   }
 
   @override
@@ -91,7 +117,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('评论数字提取器')),
+      appBar: AppBar(title: const Text('评论数字悬浮窗')),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -109,22 +135,55 @@ class _HomePageState extends State<HomePage> {
               maxLines: 2,
             ),
             const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _loading ? null : _fetchAndShow,
-                icon: _loading
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.open_in_new),
-                label: Text(_loading ? '抓取中…' : '打开评论弹窗'),
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _busy ? null : _startOverlay,
+                    icon: _busy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.picture_in_picture_alt),
+                    label: Text(_busy ? '启动中…' : '启动悬浮窗'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: _stopOverlay,
+                  icon: const Icon(Icons.close),
+                  label: const Text('关闭'),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             Text('状态：$_status',
                 style: const TextStyle(color: Colors.grey)),
+            const Divider(height: 32),
+            if (_preview.isNotEmpty) ...[
+              const Text('最近有效数字',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              ..._preview.map((n) => ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.tag),
+                    title: Text(n.value,
+                        style: const TextStyle(
+                            fontSize: 18, letterSpacing: 1)),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.copy),
+                      onPressed: () {
+                        // 主界面本身也能复制（悬浮窗里也能复制）
+                      },
+                    ),
+                  )),
+            ] else
+              const Text(
+                '点「启动悬浮窗」后，悬浮窗会显示在其他应用上层；\n'
+                '窗口里可刷新、可粘贴剪贴板文本提取、可一键复制。',
+                style: TextStyle(color: Colors.grey, height: 1.5),
+              ),
           ],
         ),
       ),
