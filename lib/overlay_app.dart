@@ -3,9 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 
 import 'constants.dart';
-import 'models/number_item.dart';
-import 'services/number_filter.dart';
+import 'models/comment_item.dart';
 import 'services/smzdm_service.dart';
+
+/// 悬浮窗里最多显示多少条最新评论
+const int _kMaxShow = 5;
 
 /// 悬浮窗应用根（由 overlayMain 启动，运行在独立的 Flutter 引擎里）。
 class OverlayApp extends StatelessWidget {
@@ -29,8 +31,9 @@ class OverlayPage extends StatefulWidget {
 }
 
 class _OverlayPageState extends State<OverlayPage> {
+  /// 当前监控的链接（主 App 可通过 shareData 替换）
   String _url = kDefaultUrl;
-  List<NumberItem> _numbers = [];
+  List<CommentItem> _comments = [];
   bool _loading = false;
   String _status = '';
 
@@ -38,25 +41,22 @@ class _OverlayPageState extends State<OverlayPage> {
   void initState() {
     super.initState();
     _listenForUrl();
-    _refresh();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
   }
 
-  /// 接收主 App 通过 shareData 传过来的链接（best-effort，失败不影响默认链接）
+  /// 接收主 App 通过 shareData 传来的链接（best-effort，失败用默认链接）
   void _listenForUrl() {
     try {
       FlutterOverlayWindow.overlayListener.listen((event) {
-        if (event is String &&
-            event.startsWith('http') &&
-            event != _url) {
+        if (event is String && event.trim().isNotEmpty && event != _url) {
           _url = event;
           _refresh();
         }
       });
-    } catch (_) {
-      // 悬浮窗引擎里若未注册该通道，忽略即可，用默认链接
-    }
+    } catch (_) {}
   }
 
+  /// 刷新：重新请求接口（内部会自动归一化链接）并处理
   Future<void> _refresh() async {
     setState(() {
       _loading = true;
@@ -64,76 +64,36 @@ class _OverlayPageState extends State<OverlayPage> {
     });
     try {
       final comments = await SmzdmService.fetchComments(_url);
-      final nums = NumberFilter.extractFromComments(comments, max: 5);
       if (!mounted) return;
+      final show = comments.take(_kMaxShow).toList();
       setState(() {
-        _numbers = nums;
-        _status = nums.isEmpty
-            ? '共 ${comments.length} 条评论，暂无 9 位数字'
-            : '已更新（${comments.length} 条评论）';
+        _comments = show;
+        _status = show.isEmpty
+            ? '未获取到评论'
+            : '共 ${comments.length} 条，显示最近 ${show.length} 条';
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _status = '抓取失败，可点「粘贴」手动提取');
+      setState(() => _status = '抓取失败，请点刷新重试');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  /// 读取系统剪贴板，把里面的 9 位数字提取出来（无需弹键盘输入）
-  Future<void> _paste() async {
-    try {
-      final data = await Clipboard.getData(Clipboard.kTextPlain);
-      final text = (data?.text ?? '').trim();
-      if (text.isEmpty) {
-        setState(() => _status = '剪贴板为空');
-        return;
-      }
-      final parts = text.split(RegExp(r'[\n\r]+'));
-      final extracted = NumberFilter.extractFromComments(parts, max: 5);
-      if (extracted.isEmpty) {
-        final one = NumberFilter.collapseTo9(text);
-        if (one == null) {
-          setState(() => _status = '剪贴板里没有 9 位数字');
-          return;
-        }
-        setState(() {
-          _merge([NumberItem(value: one, source: text)]);
-          _status = '已从剪贴板提取 1 个';
-        });
-        return;
-      }
-      setState(() {
-        _merge(extracted);
-        _status = '已从剪贴板提取 ${extracted.length} 个';
-      });
-    } catch (e) {
-      setState(() => _status = '读取剪贴板失败');
+  /// 复制：有 9 位数字就复制数字，否则复制整条评论
+  Future<void> _copy(CommentItem item) async {
+    final value = item.code ?? item.text;
+    await Clipboard.setData(ClipboardData(text: value));
+    if (mounted) {
+      setState(() => _status =
+          item.code != null ? '已复制码 ${item.code}' : '已复制评论');
     }
-  }
-
-  void _merge(List<NumberItem> items) {
-    for (final e in items) {
-      if (!_numbers.any((n) => n.value == e.value)) {
-        _numbers.insert(0, e);
-      }
-    }
-    if (_numbers.length > 5) {
-      _numbers = _numbers.sublist(0, 5);
-    }
-  }
-
-  Future<void> _copy(String v) async {
-    await Clipboard.setData(ClipboardData(text: v));
-    if (mounted) setState(() => _status = '已复制 $v');
   }
 
   Future<void> _close() async {
     try {
       await FlutterOverlayWindow.closeOverlay();
-    } catch (_) {
-      // 若通道不可用，用户仍可通过「拖到底部关闭区」关闭悬浮窗
-    }
+    } catch (_) {}
   }
 
   @override
@@ -146,16 +106,17 @@ class _OverlayPageState extends State<OverlayPage> {
           borderRadius: BorderRadius.circular(16),
           color: Colors.white,
           child: Container(
-            width: 300,
-            padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+            width: 336,
+            padding: const EdgeInsets.fromLTRB(14, 8, 8, 10),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                // 顶部栏：标题 + 刷新 + 关闭
                 Row(
                   children: [
                     const Expanded(
                       child: Text(
-                        '最新9位数字',
+                        '最新评论',
                         style: TextStyle(
                             fontSize: 16, fontWeight: FontWeight.bold),
                       ),
@@ -165,12 +126,6 @@ class _OverlayPageState extends State<OverlayPage> {
                       tooltip: '刷新',
                       onPressed: _loading ? null : _refresh,
                       icon: const Icon(Icons.refresh, size: 22),
-                    ),
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      tooltip: '粘贴剪贴板提取',
-                      onPressed: _paste,
-                      icon: const Icon(Icons.paste, size: 22),
                     ),
                     IconButton(
                       visualDensity: VisualDensity.compact,
@@ -184,39 +139,24 @@ class _OverlayPageState extends State<OverlayPage> {
                   const LinearProgressIndicator(minHeight: 2)
                 else
                   const SizedBox(height: 2),
-                const Divider(height: 10),
-                if (_numbers.isEmpty)
+                const Divider(height: 8),
+
+                // 评论列表（每条：正文 + 时间 + 复制按钮）
+                if (_comments.isEmpty)
                   const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 18),
-                    child: Text('暂无符合条件的数字',
+                    padding: EdgeInsets.symmetric(vertical: 22),
+                    child: Text('暂无评论',
                         style: TextStyle(color: Colors.grey)),
                   )
                 else
-                  ..._numbers.map(
-                    (n) => Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            n.value,
-                            style: const TextStyle(
-                              fontSize: 19,
-                              letterSpacing: 1.5,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          tooltip: '复制',
-                          onPressed: () => _copy(n.value),
-                          icon: const Icon(Icons.copy, size: 20),
-                        ),
-                      ],
-                    ),
-                  ),
+                  ..._comments.map((c) => _CommentRow(
+                        item: c,
+                        onCopy: () => _copy(c),
+                      )),
+
                 if (_status.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(top: 4),
+                    padding: const EdgeInsets.only(top: 6, right: 6),
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
@@ -230,6 +170,78 @@ class _OverlayPageState extends State<OverlayPage> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CommentRow extends StatelessWidget {
+  final CommentItem item;
+  final VoidCallback onCopy;
+
+  const _CommentRow({required this.item, required this.onCopy});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 评论正文
+          Text(
+            item.text,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 13, height: 1.35),
+          ),
+          const SizedBox(height: 3),
+          // 时间 + 数字标签 + 复制
+          Row(
+            children: [
+              const Icon(Icons.schedule, size: 12, color: Colors.black45),
+              const SizedBox(width: 3),
+              Text(
+                item.time.isEmpty ? '—' : item.time,
+                style: const TextStyle(fontSize: 11, color: Colors.black54),
+              ),
+              const SizedBox(width: 8),
+              if (item.code != null)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0x26FF9800),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    item.code!,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFFE65100),
+                    ),
+                  ),
+                ),
+              const Spacer(),
+              SizedBox(
+                height: 28,
+                child: TextButton.icon(
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: onCopy,
+                  icon: const Icon(Icons.copy, size: 15),
+                  label: Text(
+                    item.code != null ? '复制码' : '复制',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
