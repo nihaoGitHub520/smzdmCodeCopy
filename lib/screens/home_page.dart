@@ -71,8 +71,9 @@ class _HomePageState extends State<HomePage> {
   Future<void> _readScreenSize() async {
     try {
       final s = await FlutterOverlayWindow.getScreenSize();
-      final w = s.width.toDouble();
-      final h = s.height.toDouble();
+      // 注意：flutter_overlay_window 把屏幕「宽/高」放在 OverlayPosition 的 x/y 里
+      final w = s.x;
+      final h = s.y;
       if (w > 0 && h > 0 && mounted) {
         setState(() {
           _screenW = w;
