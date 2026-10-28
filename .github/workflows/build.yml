@@ -41,11 +41,15 @@ jobs:
       - name: Restore our pubspec
         run: cp /tmp/pubspec.yaml pubspec.yaml
 
-      # 注入：网络权限 + 悬浮窗权限 + 前台服务 + OverlayService，并把 minSdk 提到 23
-      - name: Patch AndroidManifest & minSdk
+      # 注入：
+      #  1) 网络/悬浮窗/前台服务权限 + OverlayService，minSdk 提到 23
+      #  2) <queries> 声明 pinduoduo 深链（Android 11+ 才能解析/打开）
+      #  3) 自定义 Application：预创建悬浮窗引擎并注册全部插件，
+      #     并额外提供 smzdm/open_url 原生通道（悬浮窗里直接拉起拼多多）
+      - name: Patch AndroidManifest & minSdk & preload engine
         run: |
           python3 - <<'PY'
-          import re, pathlib, sys
+          import re, pathlib
 
           mf = pathlib.Path('android/app/src/main/AndroidManifest.xml')
           s = mf.read_text(encoding='utf-8')
@@ -59,7 +63,7 @@ jobs:
           for p in perms:
               if p not in s:
                   s = s.replace('</manifest>',
-                                f'    <uses-permission android:name="{p}"/>\n</manifest>')
+                                '    <uses-permission android:name="%s"/>\n</manifest>' % p)
 
           if 'OverlayService' not in s:
               service = (
@@ -74,6 +78,114 @@ jobs:
               )
               s = s.replace('</application>', service + '    </application>')
 
+          # --- queries：允许解析并打开 pinduoduo:// 深链 ---
+          if '<queries>' not in s:
+              queries = (
+                  '    <queries>\n'
+                  '        <intent>\n'
+                  '            <action android:name="android.intent.action.VIEW"/>\n'
+                  '            <data android:scheme="pinduoduo"/>\n'
+                  '        </intent>\n'
+                  '        <intent>\n'
+                  '            <action android:name="android.intent.action.VIEW"/>\n'
+                  '            <data android:scheme="https"/>\n'
+                  '        </intent>\n'
+                  '    </queries>\n'
+              )
+              s = s.replace('</manifest>', queries + '</manifest>')
+
+          # --- 取包名，写入自定义 Application ---
+          pkg = None
+          for f in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
+              gp = pathlib.Path(f)
+              if not gp.exists():
+                  continue
+              t = gp.read_text(encoding='utf-8')
+              m = (re.search(r'namespace\s*[=]?\s*"([^"]+)"', t)
+                   or re.search(r'applicationId\s*[=]?\s*"([^"]+)"', t))
+              if m:
+                  pkg = m.group(1)
+                  break
+
+          if pkg:
+              if 'PreloadApp' not in s:
+                  s = re.sub(r'<application(\s)',
+                             '<application android:name="%s.PreloadApp"\\1' % pkg,
+                             s, count=1)
+
+              java = '''package %s;
+
+          import android.app.Application;
+          import android.content.Intent;
+          import android.net.Uri;
+
+          import io.flutter.FlutterInjector;
+          import io.flutter.embedding.engine.FlutterEngine;
+          import io.flutter.embedding.engine.FlutterEngineCache;
+          import io.flutter.embedding.engine.FlutterEngineGroup;
+          import io.flutter.embedding.engine.dart.DartExecutor;
+          import io.flutter.plugin.common.MethodChannel;
+          import io.flutter.plugins.GeneratedPluginRegistrant;
+
+          /**
+           * 预创建悬浮窗引擎并注册全部 Flutter 插件。
+           * flutter_overlay_window 自建 overlay 引擎时不会注册插件，
+           * 导致悬浮窗里无法使用 url_launcher / shared_preferences；
+           * 这里提前用相同的缓存 tag 建好引擎（插件检测到已存在会直接复用），
+           * 并额外注册 smzdm/open_url 原生通道用于拉起拼多多深链。
+           */
+          public class PreloadApp extends Application {
+              private static final String TAG = "myCachedEngine";
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  try {
+                      if (FlutterEngineCache.getInstance().get(TAG) == null) {
+                          FlutterEngineGroup group = new FlutterEngineGroup(this);
+                          DartExecutor.DartEntrypoint entry = new DartExecutor.DartEntrypoint(
+                                  FlutterInjector.instance().flutterLoader().findAppBundlePath(),
+                                  "overlayMain");
+                          FlutterEngine engine = group.createAndRunEngine(this, entry);
+                          GeneratedPluginRegistrant.registerWith(engine);
+                          registerOpenUrlChannel(engine);
+                          FlutterEngineCache.getInstance().put(TAG, engine);
+                      }
+                  } catch (Throwable ignored) {
+                      // 预创建失败不影响主流程
+                  }
+              }
+
+              private void registerOpenUrlChannel(FlutterEngine engine) {
+                  try {
+                      MethodChannel channel = new MethodChannel(
+                              engine.getDartExecutor().getBinaryMessenger(), "smzdm/open_url");
+                      channel.setMethodCallHandler((call, result) -> {
+                          if (!"open".equals(call.method)) {
+                              result.notImplemented();
+                              return;
+                          }
+                          try {
+                              String url = call.argument("url");
+                              Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                              intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                              startActivity(intent);
+                              result.success(true);
+                          } catch (Throwable t) {
+                              result.success(false);
+                          }
+                      });
+                  } catch (Throwable ignored) {
+                  }
+              }
+          }
+          ''' % pkg
+
+              jp = pathlib.Path('android/app/src/main/java') / pkg.replace('.', '/') / 'PreloadApp.java'
+              jp.parent.mkdir(parents=True, exist_ok=True)
+              jp.write_text(java, encoding='utf-8')
+              print('=== wrote %s ===' % jp)
+
           mf.write_text(s, encoding='utf-8')
           print('=== patched AndroidManifest.xml ===')
           print(s)
@@ -87,14 +199,15 @@ jobs:
                   t = re.sub(r'minSdkVersion\s+\d+', 'minSdkVersion 23', t)
                   t = re.sub(r'minSdk\s*=\s*\d+', 'minSdk = 23', t)
                   p.write_text(t, encoding='utf-8')
-                  print(f'=== patched minSdk in {f} ===')
-                  for line in t.splitlines():
-                      if 'minSdk' in line:
-                          print('  ', line.strip())
+                  print('=== patched minSdk in %s ===' % f)
           PY
 
       - name: Install dependencies
         run: flutter pub get
+
+      # 只输出静态分析结果（不阻断构建），便于失败时快速定位
+      - name: Analyze
+        run: flutter analyze || true
 
       - name: Build APK (release)
         run: flutter build apk --release
