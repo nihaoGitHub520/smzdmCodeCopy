@@ -79,20 +79,24 @@ jobs:
               s = s.replace('</application>', service + '    </application>')
 
           # --- queries：允许解析并打开 pinduoduo:// 深链 ---
-          if '<queries>' not in s:
-              queries = (
-                  '    <queries>\n'
-                  '        <intent>\n'
-                  '            <action android:name="android.intent.action.VIEW"/>\n'
-                  '            <data android:scheme="pinduoduo"/>\n'
-                  '        </intent>\n'
-                  '        <intent>\n'
-                  '            <action android:name="android.intent.action.VIEW"/>\n'
-                  '            <data android:scheme="https"/>\n'
-                  '        </intent>\n'
-                  '    </queries>\n'
-              )
-              s = s.replace('</manifest>', queries + '</manifest>')
+          #   Flutter 模板自带一个 <queries>（PROCESS_TEXT），优先插到它里面，
+          #   不能重复创建 <queries> 标签。
+          pdd_query = (
+              '        <intent>\n'
+              '            <action android:name="android.intent.action.VIEW"/>\n'
+              '            <data android:scheme="pinduoduo"/>\n'
+              '        </intent>\n'
+              '        <intent>\n'
+              '            <action android:name="android.intent.action.VIEW"/>\n'
+              '            <data android:scheme="https"/>\n'
+              '        </intent>\n'
+          )
+          if 'android:scheme="pinduoduo"' not in s:
+              if '</queries>' in s:
+                  s = s.replace('</queries>', pdd_query + '    </queries>', 1)
+              else:
+                  s = s.replace('</manifest>',
+                                '    <queries>\n' + pdd_query + '    </queries>\n</manifest>')
 
           # --- 取包名，写入自定义 Application ---
           pkg = None
@@ -108,7 +112,12 @@ jobs:
                   break
 
           if pkg:
-              if 'PreloadApp' not in s:
+              # Flutter 模板的 application 已带 android:name="${applicationName}"，
+              # 必须替换掉它，不能再加一个（重复属性会导致 manifest 解析失败）
+              if '${applicationName}' in s:
+                  s = s.replace('android:name="${applicationName}"',
+                                'android:name="%s.PreloadApp"' % pkg, 1)
+              elif 'PreloadApp' not in s:
                   s = re.sub(r'<application(\s)',
                              '<application android:name="%s.PreloadApp"\\1' % pkg,
                              s, count=1)
@@ -124,6 +133,7 @@ jobs:
           import io.flutter.embedding.engine.FlutterEngineCache;
           import io.flutter.embedding.engine.FlutterEngineGroup;
           import io.flutter.embedding.engine.dart.DartExecutor;
+          import io.flutter.embedding.engine.loader.FlutterLoader;
           import io.flutter.plugin.common.MethodChannel;
           import io.flutter.plugins.GeneratedPluginRegistrant;
 
@@ -141,18 +151,24 @@ jobs:
               public void onCreate() {
                   super.onCreate();
                   try {
-                      if (FlutterEngineCache.getInstance().get(TAG) == null) {
-                          FlutterEngineGroup group = new FlutterEngineGroup(this);
-                          DartExecutor.DartEntrypoint entry = new DartExecutor.DartEntrypoint(
-                                  FlutterInjector.instance().flutterLoader().findAppBundlePath(),
-                                  "overlayMain");
-                          FlutterEngine engine = group.createAndRunEngine(this, entry);
-                          GeneratedPluginRegistrant.registerWith(engine);
-                          registerOpenUrlChannel(engine);
-                          FlutterEngineCache.getInstance().put(TAG, engine);
+                      if (FlutterEngineCache.getInstance().get(TAG) != null) {
+                          return;
                       }
+                      // Application 阶段 Flutter 还没初始化，必须先初始化再取 bundle 路径
+                      FlutterLoader loader = FlutterInjector.instance().flutterLoader();
+                      loader.startInitialization(this);
+                      loader.ensureInitializationComplete(this, null);
+                      String bundlePath = loader.findAppBundlePath();
+
+                      FlutterEngineGroup group = new FlutterEngineGroup(this);
+                      DartExecutor.DartEntrypoint entry =
+                              new DartExecutor.DartEntrypoint(bundlePath, "overlayMain");
+                      FlutterEngine engine = group.createAndRunEngine(this, entry);
+                      GeneratedPluginRegistrant.registerWith(engine);
+                      registerOpenUrlChannel(engine);
+                      FlutterEngineCache.getInstance().put(TAG, engine);
                   } catch (Throwable ignored) {
-                      // 预创建失败不影响主流程
+                      // 预创建失败不影响主流程（悬浮窗仍有转给主 App 打开的兜底）
                   }
               }
 
@@ -185,6 +201,11 @@ jobs:
               jp.parent.mkdir(parents=True, exist_ok=True)
               jp.write_text(java, encoding='utf-8')
               print('=== wrote %s ===' % jp)
+
+          # 校验补丁后的 manifest 是合法 XML（避免再出现 gradle manifest 解析失败）
+          import xml.dom.minidom
+          xml.dom.minidom.parseString(s.encode('utf-8'))
+          print('=== manifest XML 校验通过 ===')
 
           mf.write_text(s, encoding='utf-8')
           print('=== patched AndroidManifest.xml ===')
